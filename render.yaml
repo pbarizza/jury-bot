@@ -2,17 +2,27 @@ services:
   - type: web
     name: jury-bot-api
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api.rag_startup_pipeline:app --port $PORT
+    region: oregon  # or frankfurt, singapore (optional)
     envVars:
       - key: PINECONE_API_KEY
         fromSecret: PINECONE_API_KEY
-      - key: GROQ_API_KEY
-        fromSecret: GROQ_API_KEY
-      - key: EMBEDDING_MODEL
-        value: BAAI/bge-large-en-v1.5
       - key: INDEX_NAME
         value: startup-rag
-    env:
+      - key: EMBEDDING_MODEL
+        value: BAAI/bge-large-en-v1.5
+      - key: GROQ_API_KEY
+        fromSecret: GROQ_API_KEY  # Only if using LLM reasoning
+      - key: CSV_FILE_PATH
+        value: ./api/startups_data.csv
+      - key: PITCH_DECK_DIR
+        value: ./api/pitch_decks
+      - key: API_HOST
+        value: 0.0.0.0
       - key: API_PORT
         value: 10000
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.rag_startup_pipeline:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: models-disk
+      mountPath: /var/models
+      sizeGB: 10
