@@ -160,4 +160,129 @@ def ingest_data():
 
     try:
         df = pd.read_csv(CSV_FILE_PATH)
-        logger.info(f"✅
+        logger.info(f"✅ Loaded {len(df)} startups from {CSV_FILE_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to load CSV: {e}")
+        raise RuntimeError(f"CSV load failed: {e}")
+
+    df = df.fillna("")  # Clean NaNs
+
+    batch_size = 32
+    for i in range(0, len(df), batch_size):
+        i_end = min(i + batch_size, len(df))
+        batch = df.iloc[i:i_end]
+
+        ids = []
+        texts = []
+        metadatas = []
+
+        for _, row in batch.iterrows():
+            startup_name = row.get('Startup Name', 'Unknown')
+            source = row.get('Source', 'Unknown')
+            safe_startup = sanitize_id(startup_name)
+            safe_source = sanitize_id(source)
+            doc_id = f"startup-{safe_startup}-{safe_source}"[:512]
+
+            text = prepare_startup_document(row)
+
+            metadata = {k: "" if pd.isna(v) or v is None else str(v) for k, v in row.items() if pd.notna(k)}
+            metadata['full_text'] = text
+
+            ids.append(doc_id)
+            texts.append(text)
+            metadatas.append(metadata)
+
+        # Generate embeddings
+        embeds = get_embedding_model().encode(texts).tolist()
+        to_upsert = list(zip(ids, embeds, metadatas))
+        index.upsert(vectors=to_upsert)
+        logger.info(f"✅ Upserted batch {i} to {i_end}")
+
+    logger.info("🎉 Data ingestion complete!")
+
+# -------------------------------
+# API Endpoints
+# -------------------------------
+
+@app.get("/")
+def home():
+    return {
+        "status": "alive",
+        "service": "Jury-Bot RAG API",
+        "endpoints": {
+            "query": "POST /query",
+            "health": "GET /health"
+        }
+    }
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint"""
+    try:
+        indexes = pc.list_indexes().names()
+        return {
+            "status": "healthy",
+            "pinecone_connected": True,
+            "index_exists": INDEX_NAME in indexes,
+            "model_loaded": model is not None
+        }
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
+
+class QueryRequest(BaseModel):
+    question: str
+    top_k: Optional[int] = 3
+
+@app.post("/query")
+def query_rag(request: QueryRequest):
+    try:
+        question = request.question.strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+        top_k = max(1, min(request.top_k, 10))
+
+        # Lazy load model
+        embedding_model = get_embedding_model()
+        query_embedding = embedding_model.encode(question).tolist()
+
+        index = pc.Index(INDEX_NAME)
+        results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
+
+        matches = []
+        for match in results['matches']:
+            meta = match['metadata']
+            matches.append({
+                "id": match['id'],
+                "score": match['score'],
+                "startup_name": meta.get('Startup Name', 'Unknown'),
+                "domain": meta.get('Domain', 'N/A'),
+                "subdomain": meta.get('Subdomain', 'N/A'),
+                "stage": meta.get('Stage', 'N/A'),
+                "funding_stage": meta.get('Funding Stage', 'N/A'),
+                "team_size": meta.get('Team Size', 'N/A'),
+                "description": meta.get('Description', '')[:300] + "...",
+                "full_context": meta.get('full_text', '')
+            })
+
+        return {
+            "question": question,
+            "results": matches
+        }
+
+    except Exception as e:
+        logger.error(f"Query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# -------------------------------
+# CLI: Run ingest or serve
+# -------------------------------
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "ingest":
+            ingest_data()
+        else:
+            print("Usage: python rag_startup_pipeline.py ingest")
+    else:
+        print("Run via uvicorn (see render.yaml)")
