@@ -9,7 +9,8 @@ import os
 # Use Streamlit secrets in production, .env in dev
 try:
     # Running in Streamlit Cloud (GitHub Secrets)
-    BACKEND_URL = st.secrets["BACKEND_URL"]
+#    BACKEND_URL = st.secrets["BACKEND_URL"]
+    BACKEND_URL = "https://jury-bot.onrender.com/query"
 except KeyError:
     # Fallback to .env (for local dev)
     from dotenv import load_dotenv
