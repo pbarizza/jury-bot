@@ -12,7 +12,7 @@ Jury-Bot helps investors, incubators, or competition organizers:
 - **Search** 500+ startups by domain, region, team size, funding, and more
 - **Understand** each startup deeply by analyzing its pitch deck and metadata
 - **Rank** startups based on innovation, traction, team strength, and market fit
-- **Answer complex queries** like:
+- **Answer  queries** like:
   - "Which startups are from Saudi Arabia?"
   - "Show me AI startups with team size > 5"
   - "Why was SP-0042 ranked so high?"
