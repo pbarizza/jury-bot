@@ -77,13 +77,14 @@ st.markdown("""
 # -------------------------------
 st.markdown('<h1 class="title">🤖 Jury-Bot</h1>', unsafe_allow_html=True)
 st.markdown('<p class="subtitle">Your AI-Powered Startup Judge</p>', unsafe_allow_html=True)
+st.markdown('<h3 class="debug">{BACKEND_URL}</h3>', unsafe_allow_html=True)
 
 # -------------------------------
 # Initialize Chat History
 # -------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I’m Jury-Bot. Ask me about any startup, their pitch, or ask me to rank them.`{BACKEND_URL}`"}
+        {"role": "assistant", "content": "Hello! I’m Jury-Bot. Ask me about any startup, their pitch, or ask me to rank them."}
     ]
 
 # -------------------------------
