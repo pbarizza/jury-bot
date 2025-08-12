@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: jury-bot-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.rag_startup_pipeline:app --port $PORT
+    envVars:
+      - key: PINECONE_API_KEY
+        fromSecret: PINECONE_API_KEY
+      - key: GROQ_API_KEY
+        fromSecret: GROQ_API_KEY
+      - key: EMBEDDING_MODEL
+        value: BAAI/bge-large-en-v1.5
+      - key: INDEX_NAME
+        value: startup-rag
+    env:
+      - key: API_PORT
+        value: 10000
