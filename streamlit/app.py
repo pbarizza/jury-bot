@@ -83,7 +83,7 @@ st.markdown('<p class="subtitle">Your AI-Powered Startup Judge</p>', unsafe_allo
 # -------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I’m Jury-Bot. Ask me about any startup, their pitch, or ask me to rank them.{BACKEND_URL}"}
+        {"role": "assistant", "content": "Hello! I’m Jury-Bot. Ask me about any startup, their pitch, or ask me to rank them.`{BACKEND_URL}`"}
     ]
 
 # -------------------------------
