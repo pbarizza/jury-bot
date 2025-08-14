@@ -16,3 +16,4 @@ sdv
 confluent-kafka
 pydantic
 python-dotenv
+groq
