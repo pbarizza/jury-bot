@@ -7,10 +7,11 @@ import pandas as pd
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import logging
+from groq import Groq  # <-- New import
 
 # -------------------------------
 # Configure Logging
@@ -21,19 +22,20 @@ logger = logging.getLogger(__name__)
 # -------------------------------
 # Load Environment Variables
 # -------------------------------
-from dotenv import load_dotenv  # Optional: only if using .env locally
-
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "startup-rag")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
 CSV_FILE_PATH = os.getenv("CSV_FILE_PATH", "./api/startups_data.csv")
 PITCH_DECK_DIR = os.getenv("PITCH_DECK_DIR", "./api/pitch_decks")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # For future LLM use
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Validate required env vars (Pinecone key is essential)
+# Validate required env vars
 if not PINECONE_API_KEY:
     logger.error("PINECONE_API_KEY is missing")
     raise EnvironmentError("PINECONE_API_KEY must be set")
+if not GROQ_API_KEY:
+    logger.error("GROQ_API_KEY is missing")
+    raise EnvironmentError("GROQ_API_KEY must be set")
 
 # -------------------------------
 # Initialize Services
@@ -45,11 +47,10 @@ except Exception as e:
     logger.error(f"❌ Failed to connect to Pinecone: {e}")
     raise
 
-# We'll lazy-load the model to avoid startup issues
+# Lazy-load embedding model
 model = None
 
 def get_embedding_model():
-    """Lazy load the embedding model to handle cold starts"""
     global model
     if model is None:
         try:
@@ -63,20 +64,27 @@ def get_embedding_model():
 
 DIMENSION = 1024  # Matches BAAI/bge-large-en-v1.5
 
+# Initialize Groq client
+try:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    logger.info("✅ Connected to Groq")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Groq client: {e}")
+    raise
+
 # -------------------------------
 # FastAPI App
 # -------------------------------
 app = FastAPI(
     title="Jury-Bot RAG API",
-    description="Vector search backend for startup evaluation",
+    description="Vector search + LLM generation for startup evaluation",
     version="1.0.0"
 )
 
 # -------------------------------
-# Utility: Sanitize IDs (ASCII-only)
+# Utility: Sanitize IDs
 # -------------------------------
 def sanitize_id(text: str) -> str:
-    """Convert any string into a safe, ASCII-only ID"""
     if not isinstance(text, str) or text.strip() == "" or pd.isna(text):
         return "unknown"
     text = str(text).strip()
@@ -90,13 +98,11 @@ def sanitize_id(text: str) -> str:
 # Text & File Utilities
 # -------------------------------
 def clean_text(text):
-    """Clean and normalize text"""
     if pd.isna(text) or not isinstance(text, str):
         return ""
     return re.sub(r'\s+', ' ', text.strip())
 
 def read_pitch_deck(file_name):
-    """Safely read pitch deck with fallbacks"""
     if pd.isna(file_name) or not isinstance(file_name, str):
         return "No pitch deck provided."
 
@@ -121,7 +127,6 @@ def read_pitch_deck(file_name):
 # Prepare Document for Embedding
 # -------------------------------
 def prepare_startup_document(row):
-    """Combine key fields and pitch deck into a searchable text"""
     pitch_text = read_pitch_deck(row.get('Pitch Deck File', ''))
 
     combined_text = f"""
@@ -141,20 +146,16 @@ def prepare_startup_document(row):
     return clean_text(combined_text)
 
 # -------------------------------
-# Ingest Data (Optional: Run via CLI)
+# Ingest Data
 # -------------------------------
 def ingest_data():
-    """Load CSV and upsert into Pinecone"""
     if INDEX_NAME not in pc.list_indexes().names():
         logger.info(f"Creating index: {INDEX_NAME}")
         pc.create_index(
             name=INDEX_NAME,
             dimension=DIMENSION,
             metric="cosine",
-            spec=ServerlessSpec(
-                cloud="aws",
-                region="us-east-1"
-            )
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")
         )
     index = pc.Index(INDEX_NAME)
 
@@ -165,7 +166,7 @@ def ingest_data():
         logger.error(f"Failed to load CSV: {e}")
         raise RuntimeError(f"CSV load failed: {e}")
 
-    df = df.fillna("")  # Clean NaNs
+    df = df.fillna("")
 
     batch_size = 32
     for i in range(0, len(df), batch_size):
@@ -192,7 +193,6 @@ def ingest_data():
             texts.append(text)
             metadatas.append(metadata)
 
-        # Generate embeddings
         embeds = get_embedding_model().encode(texts).tolist()
         to_upsert = list(zip(ids, embeds, metadatas))
         index.upsert(vectors=to_upsert)
@@ -217,14 +217,14 @@ def home():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint"""
     try:
         indexes = pc.list_indexes().names()
         return {
             "status": "healthy",
             "pinecone_connected": True,
             "index_exists": INDEX_NAME in indexes,
-            "model_loaded": model is not None
+            "model_loaded": model is not None,
+            "groq_connected": groq_client is not None
         }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
@@ -232,6 +232,7 @@ def health_check():
 class QueryRequest(BaseModel):
     question: str
     top_k: Optional[int] = 3
+    model: Optional[str] = "llama3-8b-8192"  # Allow model override
 
 @app.post("/query")
 def query_rag(request: QueryRequest):
@@ -241,17 +242,29 @@ def query_rag(request: QueryRequest):
             raise HTTPException(status_code=400, detail="Question cannot be empty")
 
         top_k = max(1, min(request.top_k, 10))
+        llm_model = request.model
 
-        # Lazy load model
+        # Validate LLM model (optional safety check)
+        allowed_models = ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768", "gemma-7b-it"]
+        if llm_model not in allowed_models:
+            raise HTTPException(status_code=400, detail=f"Invalid model. Choose from: {allowed_models}")
+
+        # Get query embedding
         embedding_model = get_embedding_model()
         query_embedding = embedding_model.encode(question).tolist()
 
+        # Query Pinecone
         index = pc.Index(INDEX_NAME)
         results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
 
+        # Collect contexts and metadata
+        contexts = []
         matches = []
         for match in results['matches']:
             meta = match['metadata']
+            full_text = meta.get('full_text', '')
+            contexts.append(full_text)
+
             matches.append({
                 "id": match['id'],
                 "score": match['score'],
@@ -262,12 +275,42 @@ def query_rag(request: QueryRequest):
                 "funding_stage": meta.get('Funding Stage', 'N/A'),
                 "team_size": meta.get('Team Size', 'N/A'),
                 "description": meta.get('Description', '')[:300] + "...",
-                "full_context": meta.get('full_text', '')
+                "full_context": full_text
             })
+
+        # Build prompt for Groq
+        context_str = "\n\n---\n\n".join(contexts[:3])  # Use top 3
+        prompt = f"""
+        You are an expert startup evaluator. Answer the question using only the context below.
+
+        Context:
+        {context_str}
+
+        Question:
+        {question}
+
+        Answer concisely and professionally:
+        """
+
+        # Call Groq LLM
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model=llm_model,
+            temperature=0.3,
+            max_tokens=512,
+        )
+        generated_answer = chat_completion.choices[0].message.content.strip()
 
         return {
             "question": question,
-            "results": matches
+            "generated_answer": generated_answer,
+            "retrieved_results": matches,
+            "context_used": context_str
         }
 
     except Exception as e:
