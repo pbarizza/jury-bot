@@ -9,9 +9,9 @@ from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import logging
-from groq import Groq  # <-- New import
+from groq import Groq
 
 # -------------------------------
 # Configure Logging
@@ -77,8 +77,8 @@ except Exception as e:
 # -------------------------------
 app = FastAPI(
     title="Jury-Bot RAG API",
-    description="Vector search + LLM generation for startup evaluation",
-    version="1.0.0"
+    description="AI-powered conversational startup evaluator with reasoning and ranking",
+    version="2.0.0"
 )
 
 # -------------------------------
@@ -132,6 +132,7 @@ def prepare_startup_document(row):
     combined_text = f"""
     Startup Name: {row.get('Startup Name', 'N/A')}
     Domain: {row.get('Domain', 'N/A')}, Subdomain: {row.get('Subdomain', 'N/A')}
+    Country: {row.get('Country', 'N/A')}
     Stage: {row.get('Stage', 'N/A')}, Team Size: {row.get('Team Size', 'N/A')}, Monthly Revenue: {row.get('Monthly Revenue', 'N/A')}
     Funding: {row.get('Has Funding', 'N/A')} (Amount: {row.get('Funding Amount', 'N/A')}, Stage: {row.get('Funding Stage', 'N/A')})
     Description: {row.get('Description', 'N/A')}
@@ -201,6 +202,16 @@ def ingest_data():
     logger.info("🎉 Data ingestion complete!")
 
 # -------------------------------
+# Pydantic Models
+# -------------------------------
+class QueryRequest(BaseModel):
+    question: str
+    top_k: Optional[int] = 3
+    model: Optional[str] = "llama3-8b-8192"
+    chat_history: Optional[List[dict]] = None  # For future use
+
+
+# -------------------------------
 # API Endpoints
 # -------------------------------
 
@@ -209,6 +220,7 @@ def home():
     return {
         "status": "alive",
         "service": "Jury-Bot RAG API",
+        "version": "2.0.0",
         "endpoints": {
             "query": "POST /query",
             "health": "GET /health"
@@ -229,10 +241,6 @@ def health_check():
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
-class QueryRequest(BaseModel):
-    question: str
-    top_k: Optional[int] = 3
-    model: Optional[str] = "llama3-8b-8192"  # Allow model override
 
 @app.post("/query")
 def query_rag(request: QueryRequest):
@@ -244,7 +252,6 @@ def query_rag(request: QueryRequest):
         top_k = max(1, min(request.top_k, 10))
         llm_model = request.model
 
-        # Validate LLM model (optional safety check)
         allowed_models = ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768", "gemma-7b-it"]
         if llm_model not in allowed_models:
             raise HTTPException(status_code=400, detail=f"Invalid model. Choose from: {allowed_models}")
@@ -257,52 +264,80 @@ def query_rag(request: QueryRequest):
         index = pc.Index(INDEX_NAME)
         results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
 
-        # Collect contexts and metadata
-        contexts = []
+        # Collect startup metadata
         matches = []
+        contexts = []
+
         for match in results['matches']:
             meta = match['metadata']
             full_text = meta.get('full_text', '')
             contexts.append(full_text)
 
             matches.append({
-                "id": match['id'],
-                "score": match['score'],
                 "startup_name": meta.get('Startup Name', 'Unknown'),
                 "domain": meta.get('Domain', 'N/A'),
-                "subdomain": meta.get('Subdomain', 'N/A'),
-                "stage": meta.get('Stage', 'N/A'),
+                "country": meta.get('Country', 'N/A'),
                 "funding_stage": meta.get('Funding Stage', 'N/A'),
                 "team_size": meta.get('Team Size', 'N/A'),
+                "monthly_revenue": meta.get('Monthly Revenue', 'N/A'),
                 "description": meta.get('Description', '')[:300] + "...",
-                "full_context": full_text
+                "problem_solution": meta.get('Problem/Solution', ''),
+                "advantages": meta.get('Advantages', ''),
+                "technologies": meta.get('Technologies', ''),
+                "vision": meta.get('Vision', ''),
+                "business_model": meta.get('Business Model', ''),
+                "score": match['score']
             })
 
-        # Build prompt for Groq
-        context_str = "\n\n---\n\n".join(contexts[:3])  # Use top 3
+        # Build reasoning prompt
+        context_str = "\n\n---\n\n".join(contexts[:5])
+
+        # Add chat history if provided
+        history_context = ""
+        if request.chat_history:
+            recent = request.chat_history[-4:]  # Last 4 messages
+            history_context = "Recent conversation:\n"
+            history_context += "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in recent])
+            history_context += "\n\n"
+
         prompt = f"""
-        You are an expert startup evaluator. Answer the question using only the context below.
+{history_context}
+Analyze the following startup data and answer the user's question with clear reasoning.
 
-        Context:
-        {context_str}
+Startups:
+{context_str}
 
-        Question:
-        {question}
+Guidelines:
+- Break down your answer step-by-step.
+- When counting, listing, or ranking, explain your process.
+- For rankings, consider: team strength, funding, revenue, innovation, market fit.
+- Be conversational but professional.
+- Use markdown for structure (e.g., **bold**, lists, ---).
 
-        Answer concisely and professionally:
-        """
+Question: {question}
+"""
 
-        # Call Groq LLM
+        # Call Groq with system + user message
         chat_completion = groq_client.chat.completions.create(
             messages=[
                 {
+                    "role": "system",
+                    "content": (
+                        "You are Jury-Bot, an expert AI judge for startups. "
+                        "Always reason step-by-step. Be conversational, insightful, and clear. "
+                        "Use markdown to format answers: **bold**, lists, --- separators."
+                    )
+                },
+                {
                     "role": "user",
-                    "content": prompt,
+                    "content": prompt
                 }
             ],
             model=llm_model,
-            temperature=0.3,
-            max_tokens=512,
+            temperature=0.5,
+            max_tokens=1024,
+            top_p=1.0,
+            stream=False,
         )
         generated_answer = chat_completion.choices[0].message.content.strip()
 
@@ -316,6 +351,7 @@ def query_rag(request: QueryRequest):
     except Exception as e:
         logger.error(f"Query failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 # -------------------------------
 # CLI: Run ingest or serve
