@@ -108,7 +108,7 @@ if prompt := st.chat_input("Ask about startups, domains, funding, or rankings...
             response = requests.post(
                 BACKEND_URL,
                 json={"question": prompt, "top_k": 3},
-                timeout=30
+                timeout=60
             )
             if response.status_code == 200:
                 data = response.json()
