@@ -26,3 +26,49 @@ services:
       name: models-disk
       mountPath: /var/models
       sizeGB: 10
+
+  - type: web
+    name: startup-fastapi
+    runtime: python
+    region: oregon
+    plan: free
+    envVars:
+      - key: REAL_DATA_PATH
+        fromFile: true
+        value: data/startups_filtered.csv
+      - key: DUCKDB_PATH
+        value: /data/startups.duckdb
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        value: your-kafka-host:9092
+      - key: KAFKA_TOPIC
+        value: startups-created
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port ${PORT}
+    disk:
+      name: startup-data
+      mountPath: /data
+
+  - type: web
+    name: startup-streamlit
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app/app.py --server.port=${PORT} --server.address=0.0.0.0
+    envVars:
+      - key: FASTAPI_URL
+        value: https://startup-fastapi.onrender.com/generate-startup
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        value: your-kafka-host:9092
+    disk:
+      name: startup-data
+      mountPath: /data
+
+  - type: kafka
+    name: startup-kafka
+    region: oregon
+    plan: free
+    webUi: true
+    topics:
+      - name: startups-created
+        partitions: 1
