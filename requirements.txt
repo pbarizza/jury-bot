@@ -10,3 +10,9 @@ numpy
 pandas
 python-dotenv
 requests
+duckdb
+pandas
+sdv
+confluent-kafka
+pydantic
+python-dotenv
